@@ -1147,3 +1147,114 @@ Alternatives considered:
 - Wait for the watermark before writing a window. Rejected: the first
   result would appear 10 minutes after the window, which is too late.
   Update mode shows an early figure and corrects it.
+
+
+5.3 Data-quality tests
+
+Convention: every test is a SQL query that returns the rows that break the
+rule. Zero rows means the test passes. In dbt the same tests are written as
+unique, relationships and custom (singular) tests. Each test has a severity:
+"block" stops the publication of the affected tables, "warn" publishes and
+raises an alert. Violating rows are copied to dq_issue (see 3.4) with the
+test name and the load date.
+
+Assumptions: the core-banking file comes with a control record per posting
+date (row count and total of absolute amounts), stored in the table
+abs_control_total; the unknown member of every dimension has the key -1.
+
+Test 1. Uniqueness of grain (fact_transaction)
+
+SELECT transaction_id, account_key, COUNT(*) AS rows_found
+FROM fact_transaction
+GROUP BY transaction_id, account_key
+HAVING COUNT(*) > 1;
+
+Severity: block. A duplicated posting counts the same money twice in every
+total. The pipeline stops before the aggregates are rebuilt, moves the
+duplicated rows to quarantine and keeps yesterday's published figures.
+
+Test 2. Referential integrity (fact_transaction to dim_customer)
+
+SELECT f.transaction_id, f.customer_key
+FROM fact_transaction f
+LEFT JOIN dim_customer c ON f.customer_key = c.customer_key
+WHERE c.customer_key IS NULL;
+
+Severity: warn up to 0.1% of the rows of the load, block above it. A single
+missing customer is usually a customer that has not arrived from the CRM
+yet. The pipeline assigns such rows to the unknown member (key -1), logs
+them in dq_issue, and the next dimension load re-keys them (the same
+mechanism as in 2.4). A large share means a broken dimension load, so
+publication stops.
+
+Test 3. No overlapping Type 2 rows (dim_customer)
+
+SELECT a.client_no, a.customer_key AS key_a, b.customer_key AS key_b
+FROM dim_customer a
+JOIN dim_customer b
+  ON a.client_no = b.client_no
+ AND a.customer_key < b.customer_key
+ AND a.valid_from <= b.valid_to
+ AND b.valid_from <= a.valid_to;
+
+Severity: block. Overlapping periods give two valid versions for one date,
+so the key lookup of the fact load becomes ambiguous and transactions can be
+duplicated or attached to the wrong version (see 2.3). The pipeline does
+not publish the dimension and does not load facts that depend on it until
+the periods are repaired. A companion check (not shown) tests that every
+client has exactly one row with is_current = 'Y' and that there are no gaps
+between valid_to and the next valid_from.
+
+Test 4. Reconciliation against the source (fact_transaction)
+
+SELECT d.full_date,
+       c.row_count      AS source_rows,
+       COUNT(*)         AS warehouse_rows,
+       c.total_abs_uzs  AS source_total,
+       SUM(ABS(f.amount_signed_uzs)) AS warehouse_total
+FROM fact_transaction f
+JOIN dim_date d ON f.date_key = d.date_key
+JOIN abs_control_total c ON c.posting_date = d.full_date
+WHERE d.full_date = CURRENT_DATE - 1
+GROUP BY d.full_date, c.row_count, c.total_abs_uzs
+HAVING COUNT(*) <> c.row_count
+    OR SUM(ABS(f.amount_signed_uzs)) <> c.total_abs_uzs;
+
+Severity: block, tolerance zero. A difference means rows were lost or
+changed on the way. The pipeline does not publish, alerts the data owner of
+core banking and re-runs the load of the batch. If the second run gives the
+same difference, the source file is checked (it may be incomplete). The
+test also runs for every date with a correction (see 5.1).
+
+Test 5. Freshness (load_batch)
+
+SELECT MAX(loaded_at) AS last_successful_load
+FROM load_batch
+WHERE status = 'done'
+HAVING MAX(loaded_at) < CURRENT_DATE + INTERVAL '1 hour';
+
+Severity: warn at 06:00, block at 08:00. The query returns a row if no
+batch has been loaded successfully since 01:00 of today, that is, the file
+is late or the load failed. The dashboard then keeps yesterday's figure and
+shows the label "data as of" with the date of the last good load, so
+management does not read old numbers as new. At 06:00 the on-call engineer
+is alerted, which leaves 2 hours to re-run before the 08:00 deadline.
+
+Summary
+
+| Category | Table | Severity | Action on failure |
+| Uniqueness of grain | fact_transaction | block | Quarantine duplicates, keep yesterday's figures |
+| Referential integrity | fact_transaction | warn / block | Unknown member -1, log, re-key later |
+| No overlapping Type 2 rows | dim_customer | block | Do not publish dimension, repair periods |
+| Reconciliation | fact_transaction | block | Re-run, then check source file |
+| Freshness | load_batch | warn / block | Show "data as of", alert |
+
+Alternatives considered:
+- Warn only for every test. Rejected: wrong figures would reach management
+  silently, which is worse than a late figure.
+- Block for every test. Rejected: one late customer would stop the whole
+  platform. Severity levels keep a minor issue from blocking the 08:00
+  report.
+- Run the tests only on the final tables. Rejected: staging is checked
+  first (duplicates, missing keys), because repairing data before it enters
+  the fact table is cheaper than after.
