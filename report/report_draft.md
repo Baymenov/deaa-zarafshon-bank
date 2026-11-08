@@ -253,3 +253,36 @@ Alternatives considered:
    columnar compression. Not rejected as a base, but it does not reduce
    the number of rows a Question 2 query has to read, so it is used
    together with the monthly table and not instead of it.
+
+
+Part 2. Customer history and slowly changing dimensions
+
+2.1 SCD type for each attribute
+
+Question 5 asks for the full history of branch, segment and risk rating,
+with the source and date of every value. This decides the first three
+rows. For the other attributes the choice depends on whether anyone needs
+the old value.
+
+| Attribute                | Source       | Changes how often          | SCD type | Reason |
+| Branch of record         | Core banking | A few % of customers a year | Type 2  | Q5 requires the branch history, and changes are rare, so few extra rows. |
+| Segment                  | CRM          | Reviewed quarterly         | Type 2   | Q5 requires the segment history, and reports by segment must use the segment valid on the transaction date. |
+| Risk rating              | KYC          | On any trigger event       | Type 2   | Q5 requires the history, and the Central Bank audit needs the rating that was valid at the time of each transaction. |
+| Phone number             | Mobile app   | Often                      | Type 1   | No question needs old phone numbers, and Type 2 would create many rows for no benefit. The old value stays in the vault satellite (Part 4). |
+| Date of first account    | Core banking | Never                      | Type 0   | The value is fixed, so it is never overwritten. A change in the source is a data error and is reported. |
+| Relationship manager     | CRM          | When staff change          | Type 1   | No question asks for manager history. One manager leaving would otherwise create a new row for hundreds of customers. |
+
+Alternatives considered:
+- Phone number as Type 2: rejected, because frequent changes would multiply
+  the rows of dim_customer, and every new row would also copy the Type 2
+  attributes of the customer.
+- Relationship manager as Type 2: rejected for the reason above. If
+  management later asks for results by the manager at the time, the manager
+  is moved into its own dimension (dim_relationship_manager) linked through
+  a separate table, so that staff changes do not touch dim_customer.
+- Phone number as Type 3 (a column for the previous value): rejected,
+  because it keeps only one old value and answers no stated question.
+
+Note: branch, segment and risk rating are all Type 2 in the same table.
+A change in any of them closes the current row and creates a new one, so
+one row of dim_customer describes the customer as she was during one period.
