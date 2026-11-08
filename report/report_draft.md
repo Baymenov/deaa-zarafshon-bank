@@ -176,3 +176,80 @@ day, so days without transactions are included; the date dimension has a
 year_month column; the customer is identified by client_no, because a
 Type 2 customer has several surrogate keys over time; for an account opened
 during the month, the average is taken over the days it existed.
+
+
+1.5 Size of fact_daily_balance and how to keep it affordable
+
+Estimate:
+The case does not say how many accounts a customer has. I assume 2 accounts
+per customer on average (for example one card or current account and one
+savings or deposit account).
+
+Accounts: 1,800,000 customers x 2 = 3,600,000 accounts
+Rows: 3,600,000 accounts x 730 days = 2,628,000,000 rows
+
+If every customer had only one account, the figure would be
+1,800,000 x 730 = 1,314,000,000 rows. So the table holds between 1.3 and
+2.6 billion rows. At about 40 bytes per row before compression (date key,
+account key, customer key, branch key, product key, two balances, rate),
+2.6 billion rows are about 105 GB, and about 21 GB in Parquet at 5x
+compression. This is storable, but every Question 2 query would scan
+billions of rows, and the table grows by 3.6 million rows every day.
+
+Proposal: add a monthly snapshot table, fact_monthly_balance.
+Grain: one row per account per calendar month.
+Columns: month_key, account_key, customer_key, branch_key, product_key,
+balance_day_sum_uzs, days_open, closing_balance_uzs.
+
+balance_day_sum_uzs is the sum of the daily closing balances of the account
+during the month. It is built once a month from fact_daily_balance:
+
+INSERT INTO fact_monthly_balance
+SELECT d.year_month_key,
+       f.account_key,
+       f.customer_key,
+       f.branch_key,
+       f.product_key,
+       SUM(f.closing_balance_uzs) AS balance_day_sum_uzs,
+       COUNT(*)                   AS days_open,
+       MAX(CASE WHEN d.is_month_end = 1
+                THEN f.closing_balance_uzs END) AS closing_balance_uzs
+FROM fact_daily_balance f
+JOIN dim_date d ON f.date_key = d.date_key
+WHERE d.year_month_key = 202610
+GROUP BY d.year_month_key, f.account_key, f.customer_key,
+         f.branch_key, f.product_key;
+
+Question 2 is then answered from the monthly table:
+
+SELECT c.client_no,
+       m.month_key,
+       SUM(m.balance_day_sum_uzs) / dm.days_in_month AS avg_monthly_balance_uzs
+FROM fact_monthly_balance m
+JOIN dim_customer c ON m.customer_key = c.customer_key
+JOIN dim_month dm ON m.month_key = dm.month_key
+GROUP BY c.client_no, m.month_key, dm.days_in_month;
+
+Size: 3,600,000 accounts x 24 months = 86,400,000 rows, about 30 times
+smaller than the daily table.
+
+Why Question 2 is still answered correctly: the monthly table stores the
+sum of daily balances and not the average. Sums can be added across
+accounts, and dividing by the number of days in the month at the end gives
+the exact average. Storing a ready average per account would be wrong,
+because averages of different accounts cannot be combined correctly when
+an account was opened in the middle of the month.
+
+Retention: keep the daily table only for the last 90 days (for daily
+checks and corrections) and the monthly table for the full 24 months.
+Daily data older than 90 days is archived in cheap storage.
+
+Alternatives considered:
+1. Store a row only when the balance changes (sparse snapshot). Rows drop
+   sharply because most accounts change rarely. Rejected: every query
+   must first expand the rows into days, and a missing row is ambiguous
+   (no change, or missing data).
+2. Keep the full daily table and rely on partitioning by month and
+   columnar compression. Not rejected as a base, but it does not reduce
+   the number of rows a Question 2 query has to read, so it is used
+   together with the monthly table and not instead of it.
