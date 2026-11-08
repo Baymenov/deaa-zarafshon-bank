@@ -89,3 +89,28 @@ CREATE TABLE sat_kyc_customer (
     document_expiry_date DATE,
     PRIMARY KEY (customer_hk, load_date)
 );
+
+
+-- 4.2 Load rule for sat_card_customer: insert a row only if hash_diff changed
+INSERT INTO sat_card_customer
+    (source_customer_hk, load_date, record_source, hash_diff,
+     pan_token, address, phone, card_holder_status)
+SELECT s.source_customer_hk,
+       CURRENT_TIMESTAMP,
+       'CARD',
+       s.hash_diff,
+       s.pan_token,
+       s.address,
+       s.phone,
+       s.card_holder_status
+FROM stg_card_customer s
+LEFT JOIN (
+    SELECT source_customer_hk,
+           hash_diff,
+           ROW_NUMBER() OVER (PARTITION BY source_customer_hk
+                              ORDER BY load_date DESC) AS rn
+    FROM sat_card_customer
+) cur ON cur.source_customer_hk = s.source_customer_hk
+     AND cur.rn = 1
+WHERE cur.source_customer_hk IS NULL
+   OR cur.hash_diff <> s.hash_diff;
