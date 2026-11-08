@@ -378,3 +378,90 @@ Alternative considered: store both client_no and customer_key in the fact
 table. Accepted as a small addition: customer_key is used for history,
 client_no is kept as a degenerate attribute for fast lookup of all
 transactions of one customer across all versions.
+
+
+2.4 Late-arriving segment change from the CRM
+
+Example: customer 5520 (a different customer, to keep 2.2 unchanged) was
+"mass" and became "affluent" on 2026-03-12. The CRM export with this
+change arrives on 2026-03-14, two days late.
+
+State before the late file arrives (valid_from of the first row is
+assumed):
+
+| customer_key | client_no | segment  | valid_from | valid_to   | is_current |
+| 2001         | 5520      | mass     | 2024-06-01 | 9999-12-31 | Y          |
+
+What the load must do when the file arrives on 2026-03-14:
+
+1. Read the effective date of the change from the CRM record (the date the
+   segment really changed, 2026-03-12), not the date the file was loaded
+   (2026-03-14).
+2. Compare the new segment with the current row. They differ, so this is a
+   change.
+3. Close the current row on the day before the effective date and insert
+   the new row from the effective date:
+
+| customer_key | client_no | segment  | valid_from | valid_to   | is_current |
+| 2001         | 5520      | mass     | 2024-06-01 | 2026-03-11 | N          |
+| 2002         | 5520      | affluent | 2026-03-12 | 9999-12-31 | Y          |
+
+4. Fix the facts that were already loaded. Transactions of 2026-03-12 and
+   2026-03-13 were loaded earlier with customer_key 2001 (mass), because
+   the change was not known yet. They must now point to key 2002.
+   Transactions of 2026-03-14 are not a problem if the dimension is loaded
+   before the facts in the same run, so they get key 2002 directly.
+5. Rebuild the aggregates that depend on the segment (for example, daily
+   net inflow by segment) for the dates from 2026-03-12 onward, and write
+   a line to a correction log (client_no, old key, new key, number of rows
+   changed, load timestamp).
+
+SQL for steps 3 and 4:
+
+UPDATE dim_customer
+SET valid_to = DATE '2026-03-11',
+    is_current = 'N'
+WHERE client_no = 5520
+  AND is_current = 'Y';
+
+INSERT INTO dim_customer
+    (customer_key, client_no, segment, valid_from, valid_to, is_current)
+VALUES
+    (2002, 5520, 'affluent', DATE '2026-03-12', DATE '9999-12-31', 'Y');
+
+UPDATE fact_transaction f
+SET customer_key = c.customer_key
+FROM dim_date d, dim_customer c
+WHERE f.date_key = d.date_key
+  AND c.client_no = f.client_no
+  AND d.full_date BETWEEN c.valid_from AND c.valid_to
+  AND f.client_no = 5520
+  AND d.full_date >= DATE '2026-03-12'
+  AND f.customer_key <> c.customer_key;
+
+Pipeline rule:
+(1) Within one run, dimensions are loaded before facts.
+(2) The validity dates of a Type 2 row come from the effective date in the
+source, never from the load date.
+(3) If a change arrives with an effective date earlier than the start of
+the current row, the dimension row is split so that periods stay without
+gaps and without overlaps.
+(4) After every dimension load, fact rows whose customer_key is not the
+version valid on their date are re-keyed, and the affected aggregates are
+rebuilt.
+(5) Every correction is written to a log, so that a figure reported at
+08:00 and changed later can be explained.
+
+Assumption: the CRM export contains the date of the change. If it does
+not, the effective date cannot be known, and the load date would have to be
+used. This would give wrong history, so the field must be requested from
+the CRM team.
+
+Alternatives considered:
+- Leave the old facts unchanged and apply the new segment only from the
+  load date. Rejected: transactions of 2026-03-12 and 2026-03-13 would be
+  reported under the wrong segment forever, and Question 1 (net inflow by
+  segment) would be wrong for those days.
+- Wait for the CRM file before loading the nightly facts. Rejected: one
+  late file would block all reports, and the 08:00 deadline of Question 1
+  would be missed for everyone.
