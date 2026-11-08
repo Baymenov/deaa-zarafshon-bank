@@ -661,3 +661,70 @@ Alternatives considered:
 - A snapshot with only counts per month, branch, product and stage.
   Smaller, but it cannot show which applications were stuck. It can be
   built as a view on top of the application-level snapshot when needed.
+
+
+3.4 Median days from approval to disbursement, and a nightly test
+
+Assumptions: "Q3 2026" means applications disbursed between 2026-07-01 and
+2026-09-30 (the quarter is taken by disbursement date, because only then
+the number of days is known). Only disbursed applications are included.
+A disbursed application was approved, so the filter on approval is
+implicit.
+
+Query:
+
+SELECT b.branch_name,
+       COUNT(*) AS disbursed_applications,
+       PERCENTILE_CONT(0.5) WITHIN GROUP
+           (ORDER BY (dd.full_date - da.full_date)) AS median_days
+FROM fact_loan_application f
+JOIN dim_branch b ON f.branch_key = b.branch_key
+JOIN dim_date da  ON f.decision_date_key = da.date_key
+JOIN dim_date dd  ON f.disbursed_date_key = dd.date_key
+WHERE f.decision_date_key  <> -1
+  AND f.disbursed_date_key <> -1
+  AND dd.full_date BETWEEN DATE '2026-07-01' AND DATE '2026-09-30'
+GROUP BY b.branch_name
+ORDER BY median_days DESC;
+
+dim_date is joined twice (role-playing dimension, see 3.1): da gives the
+approval date and dd the disbursement date. The syntax of
+PERCENTILE_CONT is PostgreSQL and Oracle; in SQL Server it needs an OVER
+clause, so the query would be written with a window function there.
+
+Why the median and not the average: waiting times are skewed. Most
+applications are disbursed in a few days, but a few wait for months
+(missing documents, customer delays). A few such cases pull the average up
+and the branch looks slow, while a typical customer is served quickly.
+The median shows the typical case. The count is shown next to it, because
+a median over 3 applications in a small branch is not reliable.
+
+Alternative considered: add the two stored lags
+(days_decision_to_contract + days_contract_to_disbursement). Rejected: the
+sum is NULL if either lag is missing, and the dates are the original
+data, so the dates are used. A column days_decision_to_disbursement could
+be added to the table if the question is asked often.
+
+Nightly data-quality test: milestone dates must be complete and in order.
+
+SELECT f.application_number
+FROM fact_loan_application f
+JOIN dim_date ds ON f.submitted_date_key       = ds.date_key
+JOIN dim_date da ON f.decision_date_key        = da.date_key
+JOIN dim_date dd ON f.disbursed_date_key       = dd.date_key
+WHERE f.disbursed_date_key <> -1
+  AND (   f.decision_date_key = -1
+       OR da.full_date < ds.full_date
+       OR dd.full_date < da.full_date);
+
+The test returns every disbursed application that has no approval date, or
+whose approval is before submission, or whose disbursement is before
+approval. The expected result is zero rows. Such rows would give negative
+or missing days and would damage the median above.
+
+When the test fails: the rows are copied to a table dq_issue with the
+application number, the rule name and the load date. The load of the other
+applications continues. The lag columns of the failed rows are set to NULL,
+so that they do not enter the medians. If more than 0.1% of the rows fail,
+the pipeline stops before publishing, and the data owner of core banking
+is notified.
