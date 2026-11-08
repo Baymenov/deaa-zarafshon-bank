@@ -1060,3 +1060,90 @@ Alternatives considered:
 - Reload the whole file into an empty table every night. Rejected: 9
   million rows are rewritten to change 45,000, and the load would not fit
   into the time window as the volume grows.
+
+
+5.2 Streaming vs batch for declined card transactions
+
+Assumptions: the card system writes every authorisation attempt (approved
+or declined) to one Kafka topic, card_events, about 7 million events a day
+(about 80 per second on average; I assume a peak of 5 times the average,
+about 400 per second). Kafka delivers each event at least once, so
+duplicates are possible. The dashboard may show a result up to 5 minutes
+after the event.
+
+Event schema (one JSON or Avro record per event):
+
+| Field            | Meaning |
+| event_id         | Unique id of the event, used for deduplication |
+| event_time       | Time of the authorisation at the terminal (event time) |
+| card_token       | PAN token, never the real card number |
+| merchant_id      | Merchant |
+| mcc              | Merchant category code |
+| amount, currency | Amount of the attempt |
+| status           | APPROVED or DECLINED |
+| decline_reason   | Reason code, filled only for declined events |
+| channel          | POS, ATM, online |
+
+The fields event_id, event_time, mcc and status are the minimum for the
+question. Kafka also adds its own ingest timestamp to each record.
+
+Pipeline, from the topic to the dashboard table:
+
+1. Kafka topic card_events (partitioned by card_token).
+2. Stream processor (Spark Structured Streaming or Flink).
+   a. Deduplicate by event_id, keeping the state for 10 minutes.
+   b. Take event_time as the clock (not the arrival time) and set a
+      watermark of 10 minutes: events up to 10 minutes late are still
+      counted in their own window.
+   c. Aggregate in tumbling windows of 1 minute by mcc: total_count and
+      declined_count.
+   d. Output the result every 30 seconds in update mode, so a window is
+      first written with partial counts and corrected when late events
+      arrive.
+3. Serving table agg_card_decline_minute (window_start, mcc, total_count,
+   declined_count), written with upsert on (window_start, mcc).
+4. Dashboard query: sums the minutes into hours and divides.
+5. In parallel, every event is written unchanged to the data lake (Parquet,
+   partitioned by date). The nightly batch rebuilds the day from the lake
+   and overwrites the minute table for that day, which fixes events later
+   than the watermark.
+
+Where the aggregation happens: only the counts are aggregated in the
+stream. The share of declines is not stored, it is calculated in the
+query as declined_count / total_count, because a ratio cannot be added
+(the share of an hour is not the sum of the shares of its minutes). The
+hour of day is taken from window_start, so one table serves any hour.
+
+Delay: a trigger of 30 seconds plus a window of 1 minute gives a result
+about 1.5 to 2 minutes after the event, inside the 5 minutes.
+
+Late event: arrives after its window was already written but within 10
+minutes: the window is recalculated and the row is updated by the upsert.
+Arrives after the watermark: it is not added to the stream result, it is
+written to a late_events table, and the nightly rebuild includes it.
+
+Duplicated event: removed by event_id inside the 10-minute state. If the
+processor restarts and replays events, the checkpoint restores its state
+and the upsert writes the same value again, so a replay does not double
+the counts.
+
+Why not stream the core-banking file:
+1. It is a batch file produced once a night at 01:00, with end-of-day
+   balances. No data arrives between runs, so a stream would only read one
+   file once a day.
+2. No question needs it faster: Question 1 needs the figure by 08:00.
+3. It contains corrections of earlier days (see 5.1), and applying them
+   needs a set-based MERGE on a key, which a batch does well and a stream
+   does badly.
+4. A streaming cluster runs all day and costs much more than a nightly
+   batch job that runs for about 3 hours.
+
+Alternatives considered:
+- Hourly batch from the lake. Rejected: the delay is up to 60 minutes, and
+  the requirement is 5.
+- Stream only, with no nightly rebuild. Rejected: events later than the
+  watermark would be lost for good, and the day would never fully
+  reconcile with the source (see the reconciliation test in 5.3).
+- Wait for the watermark before writing a window. Rejected: the first
+  result would appear 10 minutes after the window, which is too late.
+  Update mode shows an early figure and corrects it.
