@@ -84,3 +84,36 @@ JOIN dim_branch   b ON f.branch_key   = b.branch_key
 JOIN dim_customer c ON f.customer_key = c.customer_key
 WHERE f.date_key IN (SELECT DISTINCT date_key FROM stg_fact_transaction)
 GROUP BY f.date_key, b.region, c.segment;
+
+
+-- 5.2 Serving table for the declined-transactions dashboard
+CREATE TABLE agg_card_decline_minute (
+    window_start    TIMESTAMP NOT NULL,
+    mcc             CHAR(4) NOT NULL,
+    total_count     INT NOT NULL,
+    declined_count  INT NOT NULL,
+    updated_at      TIMESTAMP NOT NULL,
+    PRIMARY KEY (window_start, mcc)
+);
+
+-- 5.2 Upsert written by the stream (a new or corrected window replaces the old row)
+INSERT INTO agg_card_decline_minute
+    (window_start, mcc, total_count, declined_count, updated_at)
+VALUES
+    (TIMESTAMP '2026-11-07 14:03:00', '5411', 1240, 37, CURRENT_TIMESTAMP)
+ON CONFLICT (window_start, mcc)
+DO UPDATE SET total_count    = EXCLUDED.total_count,
+              declined_count = EXCLUDED.declined_count,
+              updated_at     = EXCLUDED.updated_at;
+
+-- 5.2 Dashboard: decline share by merchant category and hour of day
+SELECT mcc,
+       EXTRACT(HOUR FROM window_start) AS hour_of_day,
+       SUM(declined_count)             AS declined,
+       SUM(total_count)                AS total,
+       ROUND(100.0 * SUM(declined_count) / SUM(total_count), 2) AS decline_share_pct
+FROM agg_card_decline_minute
+WHERE window_start >= DATE '2026-11-07'
+  AND window_start <  DATE '2026-11-08'
+GROUP BY mcc, EXTRACT(HOUR FROM window_start)
+ORDER BY mcc, hour_of_day;
