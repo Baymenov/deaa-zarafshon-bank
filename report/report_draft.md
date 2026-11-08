@@ -321,3 +321,60 @@ history table for each attribute. Rejected, because a report by segment and
 branch would have to join several history tables by date, and the
 "as it was at the time" picture of one customer would be spread over
 several tables. One row per customer version keeps this in a single join.
+
+
+2.3 Transactions made while customer 4471 was rated high risk
+
+Query (fact_transaction carries the customer surrogate key):
+
+SELECT f.transaction_id,
+       d.full_date,
+       f.amount_signed_uzs,
+       c.risk_rating
+FROM fact_transaction f
+JOIN dim_customer c ON f.customer_key = c.customer_key
+JOIN dim_date d     ON f.date_key = d.date_key
+WHERE c.client_no = 4471
+  AND c.risk_rating = 'high'
+ORDER BY d.full_date, f.transaction_id;
+
+For customer 4471 in 2.2, the rows with risk_rating = 'high' are keys 1001
+and 1002, so the query returns all her transactions from the start of
+history up to and including 2026-04-01. Transactions from 2026-04-02 are
+not returned, because they carry key 1003 (medium).
+
+Why this is easy with the surrogate key: when a transaction is loaded, the
+pipeline finds the version of the customer that is valid on the
+transaction date and stores its customer_key in the fact row. The question
+"what was her rating at that time" is therefore already answered when the
+row is written. The query only needs a plain join on the key and a filter
+on the rating. No date comparison is needed, and each fact row matches
+exactly one dimension row, so no transaction is duplicated or lost.
+
+If fact_transaction carried only client_no:
+
+SELECT f.transaction_id,
+       d.full_date,
+       f.amount_signed_uzs,
+       c.risk_rating
+FROM fact_transaction f
+JOIN dim_date d     ON f.date_key = d.date_key
+JOIN dim_customer c ON c.client_no = f.client_no
+                   AND d.full_date BETWEEN c.valid_from AND c.valid_to
+WHERE f.client_no = 4471
+  AND c.risk_rating = 'high'
+ORDER BY d.full_date, f.transaction_id;
+
+The join must now compare the transaction date with the validity period of
+every version of the customer. This has three problems. It is slower,
+because a range join on 9 million rows a day cannot use a simple key
+lookup. It depends on the Type 2 rows having no gaps and no overlaps (see
+the test in 5.3); if two versions overlap, a transaction is counted twice,
+and if there is a gap, it disappears from the result. And every report that
+needs history, not only this one, must repeat the same date condition, so
+one analyst forgetting it gives a wrong answer silently.
+
+Alternative considered: store both client_no and customer_key in the fact
+table. Accepted as a small addition: customer_key is used for history,
+client_no is kept as a degenerate attribute for fast lookup of all
+transactions of one customer across all versions.
