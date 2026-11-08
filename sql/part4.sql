@@ -114,3 +114,54 @@ LEFT JOIN (
      AND cur.rn = 1
 WHERE cur.source_customer_hk IS NULL
    OR cur.hash_diff <> s.hash_diff;
+
+
+WITH abs_cur AS (
+    SELECT source_customer_hk, address, load_date,
+           'ABS' AS source_name, 1 AS prec
+    FROM (SELECT s.*,
+                 ROW_NUMBER() OVER (PARTITION BY source_customer_hk
+                                    ORDER BY load_date DESC) AS rn
+          FROM sat_abs_customer s) x
+    WHERE rn = 1 AND address IS NOT NULL
+),
+crm_cur AS (
+    SELECT source_customer_hk, address, load_date,
+           'CRM' AS source_name, 2 AS prec
+    FROM (SELECT s.*,
+                 ROW_NUMBER() OVER (PARTITION BY source_customer_hk
+                                    ORDER BY load_date DESC) AS rn
+          FROM sat_crm_customer s) x
+    WHERE rn = 1 AND address IS NOT NULL
+),
+card_cur AS (
+    SELECT source_customer_hk, address, load_date,
+           'CARD' AS source_name, 3 AS prec
+    FROM (SELECT s.*,
+                 ROW_NUMBER() OVER (PARTITION BY source_customer_hk
+                                    ORDER BY load_date DESC) AS rn
+          FROM sat_card_customer s) x
+    WHERE rn = 1 AND address IS NOT NULL
+),
+all_cur AS (
+    SELECT * FROM abs_cur
+    UNION ALL SELECT * FROM crm_cur
+    UNION ALL SELECT * FROM card_cur
+),
+ranked AS (
+    SELECT l.customer_hk,
+           a.address,
+           a.source_name,
+           a.load_date,
+           ROW_NUMBER() OVER (PARTITION BY l.customer_hk
+                              ORDER BY a.load_date DESC, a.prec ASC) AS rn
+    FROM all_cur a
+    JOIN lnk_customer_source l
+      ON l.source_customer_hk = a.source_customer_hk
+)
+SELECT customer_hk,
+       address,
+       source_name AS address_source,
+       load_date   AS address_loaded_at
+FROM ranked
+WHERE rn = 1;
