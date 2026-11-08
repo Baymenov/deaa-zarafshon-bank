@@ -855,3 +855,26 @@ keep the old value in a history table. Rejected: this is Type 1 with a
 side table, and it would lose the answer to "what did the CRM say on this
 date", which Question 4.4 asks. It would also mix the values of two
 sources in one column.
+
+
+4.3 Rule for dim_customer.address
+
+Rule: the address with the most recent change wins. For each customer the
+pipeline takes the latest row of every satellite that holds an address
+(core banking, CRM, card), and chooses the row with the latest load_date.
+If two rows have the same load_date, the fixed precedence decides:
+core banking first, then CRM, then card.
+
+Because satellites are insert-only (see 4.2), the load_date of the latest
+row of a source is the date on which that source first reported its
+current address. So "latest load_date" means "the source that changed its
+address most recently".
+
+Column that shows the winner: dim_customer.address_source (values ABS, CRM,
+CARD), together with address_loaded_at (the load_date of the winning row).
+
+Example (customer from 4.2): CRM address loaded on 2026-01-16, card
+address loaded on 2026-05-03. The card row is newer, so dim_customer.address
+is the Yunusobod address, address_source = CARD, address_loaded_at =
+2026-05-03. After the CRM sends a newer address, the next load switches
+the winner to CRM without any manual step.
