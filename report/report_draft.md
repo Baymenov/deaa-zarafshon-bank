@@ -730,94 +730,78 @@ the pipeline stops before publishing, and the data owner of core banking
 is notified.
 
 
--- Part 4: raw data vault for the customer
+Part 4. Integration layer: data vault for four customer sources
 
-CREATE TABLE hub_customer (
-    customer_hk          CHAR(32) PRIMARY KEY,
-    pinfl                CHAR(14) NOT NULL UNIQUE,
-    load_date            TIMESTAMP NOT NULL,
-    record_source        VARCHAR(30) NOT NULL
-);
+4.1 Raw vault for the customer
 
-CREATE TABLE hub_source_customer (
-    source_customer_hk   CHAR(32) PRIMARY KEY,
-    source_system        VARCHAR(20) NOT NULL,
-    source_customer_id   VARCHAR(50) NOT NULL,
-    load_date            TIMESTAMP NOT NULL,
-    record_source        VARCHAR(30) NOT NULL,
-    UNIQUE (source_system, source_customer_id)
-);
+Assumptions: every retail customer has a PINFL. Business customers
+(40,000) have a tax ID instead and would follow the same pattern in a
+separate hub; they are not shown to keep the report short. The KYC export
+contains the PINFL together with the four source identifiers of the
+customer (this is how "only KYC links them all" is read). Accounts and
+transactions would be added with hub_account and a customer-account link
+in the same way and are left out here.
 
-CREATE TABLE lnk_customer_source (
-    link_hk              CHAR(32) PRIMARY KEY,
-    customer_hk          CHAR(32) NOT NULL REFERENCES hub_customer (customer_hk),
-    source_customer_hk   CHAR(32) NOT NULL REFERENCES hub_source_customer (source_customer_hk),
-    load_date            TIMESTAMP NOT NULL,
-    record_source        VARCHAR(30) NOT NULL,
-    UNIQUE (customer_hk, source_customer_hk)
-);
+Business key of hub_customer: the PINFL.
+Reasons: (1) it is the only identifier that exists in every source once
+KYC has linked them; (2) it is issued by the state to one person and does
+not change when a passport is replaced; (3) the Central Bank already
+audits KYC data by PINFL. Rejected: client_no (exists only in core
+banking), crm_id (staff can create duplicates), passport number (changes
+on renewal and some customers have no Uzbek passport).
 
-CREATE TABLE sat_abs_customer (
-    source_customer_hk   CHAR(32) NOT NULL REFERENCES hub_source_customer (source_customer_hk),
-    load_date            TIMESTAMP NOT NULL,
-    record_source        VARCHAR(30) NOT NULL,
-    hash_diff            CHAR(32) NOT NULL,
-    full_name            VARCHAR(200),
-    branch_of_record     VARCHAR(100),
-    address              VARCHAR(300),
-    first_account_date   DATE,
-    customer_status      VARCHAR(20),
-    PRIMARY KEY (source_customer_hk, load_date)
-);
+Hubs (they store only business keys):
 
-CREATE TABLE sat_card_customer (
-    source_customer_hk   CHAR(32) NOT NULL REFERENCES hub_source_customer (source_customer_hk),
-    load_date            TIMESTAMP NOT NULL,
-    record_source        VARCHAR(30) NOT NULL,
-    hash_diff            CHAR(32) NOT NULL,
-    pan_token            VARCHAR(40),
-    address              VARCHAR(300),
-    phone                VARCHAR(20),
-    card_holder_status   VARCHAR(20),
-    PRIMARY KEY (source_customer_hk, load_date)
-);
+| Table               | Columns |
+| hub_customer        | customer_hk, pinfl, load_date, record_source |
+| hub_source_customer | source_customer_hk, source_system, source_customer_id, load_date, record_source |
 
-CREATE TABLE sat_app_customer (
-    source_customer_hk   CHAR(32) NOT NULL REFERENCES hub_source_customer (source_customer_hk),
-    load_date            TIMESTAMP NOT NULL,
-    record_source        VARCHAR(30) NOT NULL,
-    hash_diff            CHAR(32) NOT NULL,
-    phone                VARCHAR(20),
-    device_id            VARCHAR(60),
-    registration_date    DATE,
-    app_status           VARCHAR(20),
-    PRIMARY KEY (source_customer_hk, load_date)
-);
+hub_source_customer holds the identifiers of the four systems:
+client_no, card_holder_id, app_user_id and crm_id. Its business key is the
+pair source_system + source_customer_id. The hash keys (customer_hk,
+source_customer_hk) are MD5 hashes of the business key.
 
-CREATE TABLE sat_crm_customer (
-    source_customer_hk   CHAR(32) NOT NULL REFERENCES hub_source_customer (source_customer_hk),
-    load_date            TIMESTAMP NOT NULL,
-    record_source        VARCHAR(30) NOT NULL,
-    hash_diff            CHAR(32) NOT NULL,
-    full_name            VARCHAR(200),
-    address              VARCHAR(300),
-    segment              VARCHAR(20),
-    relationship_manager VARCHAR(100),
-    marketing_consent    CHAR(1),
-    crm_status           VARCHAR(20),
-    PRIMARY KEY (source_customer_hk, load_date)
-);
+Link (it stores a relationship between hubs):
 
-CREATE TABLE sat_kyc_customer (
-    customer_hk          CHAR(32) NOT NULL REFERENCES hub_customer (customer_hk),
-    load_date            TIMESTAMP NOT NULL,
-    record_source        VARCHAR(30) NOT NULL,
-    hash_diff            CHAR(32) NOT NULL,
-    passport_number      VARCHAR(20),
-    full_name            VARCHAR(200),
-    birth_date           DATE,
-    risk_rating          VARCHAR(10),
-    sanctions_status     VARCHAR(20),
-    document_expiry_date DATE,
-    PRIMARY KEY (customer_hk, load_date)
-);
+| Table                | Columns |
+| lnk_customer_source  | link_hk, customer_hk, source_customer_hk, load_date, record_source |
+
+One row says: this source identifier belongs to the customer with this
+PINFL. It is loaded from the KYC mapping.
+
+Satellites (they store descriptive attributes and their history, one per
+source):
+
+| Table             | Attached to         | Columns |
+| sat_abs_customer  | hub_source_customer | source_customer_hk, load_date, record_source, hash_diff, full_name, branch_of_record, address, first_account_date, customer_status |
+| sat_card_customer | hub_source_customer | source_customer_hk, load_date, record_source, hash_diff, pan_token, address, phone, card_holder_status |
+| sat_app_customer  | hub_source_customer | source_customer_hk, load_date, record_source, hash_diff, phone, device_id, registration_date, app_status |
+| sat_crm_customer  | hub_source_customer | source_customer_hk, load_date, record_source, hash_diff, full_name, address, segment, relationship_manager, marketing_consent, crm_status |
+| sat_kyc_customer  | hub_customer        | customer_hk, load_date, record_source, hash_diff, passport_number, full_name, birth_date, risk_rating, sanctions_status, document_expiry_date |
+
+Rules for all satellites: the primary key is the hash key plus load_date;
+rows are only inserted, never updated or deleted; a new row is inserted
+only when hash_diff (a hash of all descriptive columns) differs from the
+latest row of the same key.
+
+Why two hubs and not one: the card, app, CRM and core banking records
+arrive with their own identifiers. If their satellites hung on
+hub_customer, each record would have to be matched to a PINFL before it
+could be loaded, so the raw load would wait for the KYC mapping, and a
+wrong match would have to be repaired inside the history. With
+hub_source_customer every source loads at its own time under its own key,
+and the matching is only one link row. A corrected match is a new link row
+(with an effectivity satellite on the link, not shown), and the history of
+the source stays untouched.
+
+Alternatives considered:
+- One hub_customer with the satellites attached to it. Rejected for the
+  reason above.
+- No common hub, one separate hub per source. Rejected: nothing would
+  integrate the four views of one person, and Question 5 needs them
+  together.
+- Business key client_no or crm_id for hub_customer. Rejected, see above.
+
+Note: the PINFL is personal data, so hub_customer and all satellites are
+stored in the restricted zone described in 5.4. Analysts work with
+customer_hk, not with the PINFL.
