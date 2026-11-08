@@ -465,3 +465,95 @@ Alternatives considered:
 - Wait for the CRM file before loading the nightly facts. Rejected: one
   late file would block all reports, and the 08:00 deadline of Question 1
   would be missed for everyone.
+
+
+Part 3. Loan lifecycle
+
+3.1 Design of fact_loan_application (accumulating snapshot)
+
+Why an accumulating snapshot: an application moves through a fixed
+sequence of stages and we want to measure the time between them. One row
+describes the whole life of one application, and the row is updated when
+the application reaches the next stage. This makes the question "how many
+days from submission to disbursement, and where does it stall" a simple
+subtraction inside one row.
+
+Grain: one row per loan application, from submission until it is
+disbursed, rejected or withdrawn.
+
+Date keys (one per milestone, all pointing to the same dim_date table, so
+dim_date is used as a role-playing dimension):
+
+| Column                        | Milestone |
+| submitted_date_key            | Application submitted |
+| docs_verified_date_key        | Documents verified |
+| credit_scored_date_key        | Credit scored |
+| decision_date_key             | Approved or rejected |
+| contract_signed_date_key      | Contract signed |
+| disbursed_date_key            | Loan disbursed |
+| withdrawn_date_key            | Application withdrawn (if it happened) |
+
+A milestone that has not happened yet points to a special row of dim_date
+with key -1 and the label "Not reached". We do not leave the key empty
+(NULL), because a NULL foreign key drops the row from an inner join. The
+exact timestamps of each milestone are also stored (for example
+submitted_at), so that lags shorter than one day can be calculated later.
+
+Lag measures (precomputed at load time, in days, NULL until both
+milestones have happened):
+
+| Column                          | Calculation |
+| days_submit_to_docs             | docs_verified - submitted |
+| days_docs_to_score              | credit_scored - docs_verified |
+| days_score_to_decision          | decision - credit_scored |
+| days_decision_to_contract       | contract_signed - decision |
+| days_contract_to_disbursement   | disbursed - contract_signed |
+| days_submit_to_disbursement     | disbursed - submitted (total time, Question 4) |
+| days_in_current_stage           | today - date of the last milestone reached (open applications only) |
+
+Other facts:
+
+| Column                | Meaning | Type |
+| application_count     | Constant 1 | additive |
+| requested_amount_uzs  | Amount the customer asked for | additive |
+| approved_amount_uzs   | Amount approved | additive |
+| disbursed_amount_uzs  | Amount paid out | additive |
+| interest_rate         | Approved annual rate | non-additive |
+| term_months           | Approved term | non-additive |
+
+The lag columns are days, so they can be added, but the sum is almost never
+useful. They are used with AVG, median and MAX.
+
+Dimensions:
+- dim_date (role-playing, 7 times, see above)
+- dim_branch
+- dim_loan_product
+- dim_customer (Type 2 surrogate key, the version valid at submission)
+- dim_employee (role-playing: verifier, scorer, decision maker, contract
+  officer, disbursing officer; one key column per step, because core
+  banking records the responsible employee at each step)
+- dim_application_status (current stage and final outcome: in progress,
+  approved, rejected, withdrawn, disbursed)
+
+Degenerate dimension: application_number.
+The stage at which a withdrawal happened is stored in the column
+withdrawn_at_stage.
+
+Where applications stall: for open applications, days_in_current_stage
+together with the current stage shows where they wait now. For finished
+applications, the average and the 90th percentile of each lag column show
+which step is the slowest, by branch and product.
+
+Alternatives considered:
+- A transaction-style fact table with one row per stage event (a row for
+  each of the six steps). Rejected: to get the time between two stages,
+  every query must join the table to itself or use window functions, and
+  the grain is not one application any more, so counts of applications are
+  easy to get wrong.
+- A periodic snapshot with one row per application per day. Rejected for
+  Question 4: it creates millions of rows that repeat the same stage, and
+  the lag still has to be found by scanning the days. A periodic snapshot
+  is added later in 3.3 for a different question.
+
+Assumptions: the six stage names of the case are the only milestones;
+stages happen in this order; one application has at most one disbursement.
