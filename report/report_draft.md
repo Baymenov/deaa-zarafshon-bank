@@ -878,3 +878,60 @@ address loaded on 2026-05-03. The card row is newer, so dim_customer.address
 is the Yunusobod address, address_source = CARD, address_loaded_at =
 2026-05-03. After the CRM sends a newer address, the next load switches
 the winner to CRM without any manual step.
+
+
+4.4 Audit question: CRM segment on 2026-02-10
+
+Question: what did the CRM say the segment of this customer was on
+2026-02-10, and when did we load it?
+
+Customer: crm_id C-2290 (from the case). The query goes from the business
+key to the hash key through the hub, and then reads the CRM satellite.
+
+SELECT h.source_customer_id AS crm_id,
+       s.segment,
+       s.load_date,
+       s.record_source,
+       s.hash_diff
+FROM hub_source_customer h
+JOIN sat_crm_customer s
+  ON s.source_customer_hk = h.source_customer_hk
+WHERE h.source_system      = 'CRM'
+  AND h.source_customer_id = 'C-2290'
+  AND s.load_date < TIMESTAMP '2026-02-11 00:00:00'
+ORDER BY s.load_date DESC
+LIMIT 1;
+
+How it works: the satellite is insert-only, so every row stays valid until
+the next row for the same customer appears. The answer for a date is
+therefore the latest row loaded on or before that date. The filter
+"load_date before 2026-02-11 00:00" includes the whole of 2026-02-10, and
+ORDER BY ... DESC with LIMIT 1 keeps the newest of those rows. (In SQL
+Server and Oracle LIMIT 1 is written TOP 1 and FETCH FIRST 1 ROW ONLY.)
+
+Illustrative result (the values are invented for the example):
+
+| crm_id | segment | load_date           | record_source | hash_diff |
+| C-2290 | mass    | 2026-01-16 02:10:00 | CRM           | 5b2d...   |
+
+The auditor gets the segment as the CRM reported it, the exact time we
+loaded it and the source system, and can check the same row in the raw
+file archive by hash_diff.
+
+Assumption: "on 2026-02-10" means the knowledge of the warehouse on that
+day, that is, what the CRM had told us by then. If the auditor wants the
+segment that was valid in real life on that day, the effective date from
+the CRM record is needed (see 2.4), and a late file loaded after
+2026-02-10 would change the answer.
+
+Why the star schema cannot answer this question well: dim_customer keeps
+one merged value per period of validity, so it does not store what each
+source said or when we loaded it, and the CRM segment is mixed with
+values from other sources. In addition, late changes are corrected inside
+the dimension and the facts are re-keyed (see 2.4), so the state as we
+knew it on 2026-02-10 has been overwritten and cannot be restored.
+
+Alternative considered: query by PINFL through lnk_customer_source and
+hub_customer. This is needed when the auditor names the customer by PINFL
+and not by crm_id; it adds two joins and gives the same result, because
+the link leads to the same CRM hash key.
