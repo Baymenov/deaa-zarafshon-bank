@@ -599,3 +599,65 @@ Steps of the load:
 A correction of an old, closed application (for example a wrong date) also
 arrives in the file, so step 3 finds it by application_number and updates
 it. No scan of the closed rows is needed to find it.
+
+
+3.3 Applications per stage at the end of every month
+
+Why the accumulating snapshot alone answers this badly:
+The table keeps one row per application, and the row is updated as the
+application moves on. It shows where each application is now, not where it
+was at the end of last August. The old stage is not stored as a value. It
+can be rebuilt from the milestone timestamps (the stage at a date is the
+last milestone reached before that date), but this is a poor way to answer
+a routine question:
+1. Every month-end needs a CASE over six timestamp columns, a date spine
+   for 24 month-ends, and a scan of all 2 million rows, repeated for every
+   report.
+2. Rejected and withdrawn applications must be handled by extra conditions,
+   and the current status does not say when they left the process.
+3. When a correction changes an old timestamp, past months change silently,
+   and nobody can reproduce the figure that was reported at the time.
+
+Second table: fact_loan_stage_month_end, a periodic snapshot.
+Grain: one row per application that is still open at the end of a calendar
+month. The row says at which stage the application was at that moment.
+Dimensions: dim_date (month-end date), dim_branch, dim_loan_product,
+dim_loan_stage, dim_customer. Facts: application_count (additive, 1 per
+row), requested_amount_uzs (additive across applications, not across
+months), days_in_stage (non-additive).
+
+Size: about 50,000 open applications x 24 months = 1.2 million rows, small
+compared with the 2 million rows of the accumulating snapshot, and each
+month adds only about 50,000.
+
+The table is filled once a month, right after the nightly load of the first
+day of the month, from fact_loan_application. Rows of past months are not
+changed afterwards, so the trend chart always shows what was true at the
+time. If a serious error is found, the month is rebuilt and the rebuild is
+written to the correction log.
+
+Trend query:
+
+SELECT d.year_month,
+       s.stage_name,
+       SUM(m.application_count) AS applications
+FROM fact_loan_stage_month_end m
+JOIN dim_date d       ON m.month_end_date_key = d.date_key
+JOIN dim_loan_stage s ON m.stage_key = s.stage_key
+GROUP BY d.year_month, s.stage_name
+ORDER BY d.year_month, s.stage_name;
+
+Assumptions: "in each stage" means the open stages (submitted, documents
+verified, credit scored, approved, contract signed). Applications that were
+disbursed, rejected or withdrawn are no longer in a stage; their counts per
+month come from the accumulating snapshot using the disbursed, decision and
+withdrawn dates.
+
+Alternatives considered:
+- Rebuild the stage from the accumulating snapshot at query time. Rejected
+  for the three reasons above.
+- A daily periodic snapshot of every open application. Rejected: 50,000 x
+  730 = 36.5 million rows for a question that asks about month-ends.
+- A snapshot with only counts per month, branch, product and stage.
+  Smaller, but it cannot show which applications were stuck. It can be
+  built as a view on top of the application-level snapshot when needed.
