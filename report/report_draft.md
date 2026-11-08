@@ -987,3 +987,76 @@ works, so the existing loads and reports need no retest. In a star-only
 design, a new source is a change of the central dimension that every report
 uses, and the work and the risk grow with every source added. The vault
 costs more tables at the start, but its cost per new source stays low.
+
+
+Part 5. Pipeline, quality and compliance
+
+5.1 Incremental load of fact_transaction
+
+Assumptions: the file contains one record per transaction, with the
+transaction_id and the batch (file) identifier. About 0.5% of the 9 million
+rows (about 45,000) are corrections of earlier days. A correction changes
+the amount or the fee, but not the posting date or the account. If the same
+transaction_id appears twice in one file, the later record in the file is
+the valid one. Each transaction is split into one or two postings as in
+1.3, so the grain of fact_transaction is one posting.
+
+Key for deduplication: (transaction_id, account_key). transaction_id alone
+is not enough, because a transfer has two postings with the same
+transaction_id (one per account).
+
+Decision for corrections: update the row in place, and write the old and
+the new value to a correction log table before the update.
+
+(a) Nothing is loaded twice
+1. A control table load_batch stores the file name, a hash of the file
+   and the status. If a file with the same hash already has the status
+   'done', the job stops and does nothing. A second run of the same file
+   therefore changes no data.
+2. Inside the file, duplicates are removed in staging: one row per key,
+   the last one wins.
+3. The unique key (transaction_id, account_key) on the fact table does not
+   allow a second row for the same posting. A re-run of the load finds the
+   rows already present and compares them, it does not insert them again.
+
+(b) Corrections are applied
+Staging rows are joined to the fact table on the key.
+- No match: the posting is new and is inserted.
+- Match and amount or fee is different: the old values are copied to
+  fact_transaction_correction (old amount, new amount, batch, time), then
+  the fact row is updated.
+- Match and nothing is different: the row is ignored (this is what happens
+  with the 99.5% of rows that are simply the transactions of yesterday
+  which were not loaded before, and with repeated rows).
+All steps run in one database transaction, so a failure leaves the table
+as it was before the load.
+
+(c) Yesterday's totals are ready by 08:00
+
+| Time  | Step |
+| 01:00 | File arrives |
+| 01:00 - 01:40 | Load into staging, remove duplicates, look up the keys of the dimensions (customer version by posting date, as in 2.4) |
+| 01:40 - 03:10 | MERGE into fact_transaction, write correction log |
+| 03:10 - 04:00 | Rebuild the aggregate table agg_daily_net_inflow for yesterday and for every date that has a correction |
+| 04:00 - 04:30 | Data quality tests (see 5.3) |
+| 04:30 | Publish. If a test fails, see 5.3 |
+| 04:30 - 08:00 | Reserve of 3.5 hours for a re-run |
+
+The aggregate by region, segment and day is small (regions x segments x
+days), so the dashboard reads the aggregate and does not scan 9 million
+rows. Only the dates touched by the load are rebuilt, so a correction of a
+transaction from three weeks ago changes only that day.
+
+Alternatives considered:
+- Delete and insert the corrected rows. Rejected: the delete and the
+  insert must be one transaction, the surrogate keys of the rows change if
+  they are generated again, and the old value is lost unless it is copied
+  first anyway.
+- Version the corrected rows (new row with valid_from and valid_to, as in
+  a Type 2 dimension). Rejected as the main design: every query on facts
+  would need a filter on the current version, and a forgotten filter would
+  count a transaction twice. The audit need (what was the amount before)
+  is met by the correction log, which keeps the fact table simple.
+- Reload the whole file into an empty table every night. Rejected: 9
+  million rows are rewritten to change 45,000, and the load would not fit
+  into the time window as the volume grows.
