@@ -30,3 +30,4 @@ SELECT client_no,
 FROM daily_customer
 GROUP BY client_no, year_month
 ORDER BY client_no, year_month;
+-- 1.5 Build and query the monthly balance snapshot
