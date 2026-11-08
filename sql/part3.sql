@@ -171,3 +171,30 @@ JOIN dim_date d       ON m.month_end_date_key = d.date_key
 JOIN dim_loan_stage s ON m.stage_key = s.stage_key
 GROUP BY d.year_month, s.stage_name
 ORDER BY d.year_month, s.stage_name;
+
+
+-- 3.4 Median days from approval to disbursement by branch, Q3 2026
+SELECT b.branch_name,
+       COUNT(*) AS disbursed_applications,
+       PERCENTILE_CONT(0.5) WITHIN GROUP
+           (ORDER BY (dd.full_date - da.full_date)) AS median_days
+FROM fact_loan_application f
+JOIN dim_branch b ON f.branch_key = b.branch_key
+JOIN dim_date da  ON f.decision_date_key = da.date_key
+JOIN dim_date dd  ON f.disbursed_date_key = dd.date_key
+WHERE f.decision_date_key  <> -1
+  AND f.disbursed_date_key <> -1
+  AND dd.full_date BETWEEN DATE '2026-07-01' AND DATE '2026-09-30'
+GROUP BY b.branch_name
+ORDER BY median_days DESC;
+
+-- 3.4 Nightly test: disbursed applications must have ordered milestone dates
+SELECT f.application_number
+FROM fact_loan_application f
+JOIN dim_date ds ON f.submitted_date_key       = ds.date_key
+JOIN dim_date da ON f.decision_date_key        = da.date_key
+JOIN dim_date dd ON f.disbursed_date_key       = dd.date_key
+WHERE f.disbursed_date_key <> -1
+  AND (   f.decision_date_key = -1
+       OR da.full_date < ds.full_date
+       OR dd.full_date < da.full_date);
