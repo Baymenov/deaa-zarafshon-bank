@@ -67,3 +67,60 @@ Facts:
 Assumptions: all amounts are stored in UZS together with the original
 currency; region is taken from dim_branch; balances are as of end of day,
 as delivered by the core banking file.
+
+
+1.3 Transfer between two accounts
+
+Decision: a transfer from account A to account B is stored as two rows in
+fact_transaction, one for each account. This follows from the grain chosen
+in 1.2 (one posting to one account). The core banking file has one record,
+and the load splits it into a debit row for A (transaction type "transfer
+out", negative amount) and a credit row for B (transaction type
+"transfer in", positive amount). Both rows keep the same transaction_id,
+so the two legs can be linked back to the original transfer.
+
+Example (posting date 2026-03-12, amounts in UZS):
+
+| transaction_id | account | region     | type           | amount_signed_uzs |
+| T1             | A       | Tashkent   | cash deposit   |  +500,000         |
+| T2             | A       | Tashkent   | transfer out   |  -200,000         |
+| T2             | B       | Samarkand  | transfer in    |  +200,000         |
+| T3             | B       | Samarkand  | withdrawal     |   -50,000         |
+
+Results by region:
+
+| region    | total deposits in (credits) | net inflow |
+| Tashkent  | 500,000                     | +300,000   |
+| Samarkand | 200,000                     | +150,000   |
+| Bank total| 700,000                     | +450,000   |
+
+Check: the only money that really entered or left the bank is the cash
+deposit (+500,000) and the withdrawal (-50,000), which gives +450,000. The
+transfer moved 200,000 from Tashkent to Samarkand and cancels out in the
+bank total, so the net inflow of 450,000 is correct. Each region also shows
+its own correct figure, because each leg sits in the region of its own
+account.
+
+Alternative considered: one row per transfer with two account keys
+(source_account_key and destination_account_key). Rejected for three
+reasons. First, a query by region must decide which of the two accounts
+defines the region, and the other side is lost or must be added with a
+UNION. Second, the fact table would need two keys for every dimension
+linked to the account (branch, customer, segment). Third, the sign of the
+amount would depend on which side the analyst looks from, which makes
+summing error-prone.
+
+Assumptions: fact_transaction holds postings on deposit accounts, and
+"total deposits in" is the sum of positive postings, including transfers in.
+
+Queries:
+
+SELECT b.region,
+       SUM(CASE WHEN f.amount_signed_uzs > 0
+                THEN f.amount_signed_uzs ELSE 0 END) AS total_deposits_in,
+       SUM(f.amount_signed_uzs) AS net_inflow
+FROM fact_transaction f
+JOIN dim_branch b ON f.branch_key = b.branch_key
+JOIN dim_date d ON f.date_key = d.date_key
+WHERE d.full_date = DATE '2026-03-12'
+GROUP BY b.region;
