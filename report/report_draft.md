@@ -557,3 +557,45 @@ Alternatives considered:
 
 Assumptions: the six stage names of the case are the only milestones;
 stages happen in this order; one application has at most one disbursement.
+
+
+3.2 Nightly load of fact_loan_application
+
+Assumptions: the case gives only the total of 2 million rows. I assume that
+about 5,000 applications are submitted per day and that about 50,000
+applications are open at any moment. The core banking file arrives at 01:00
+and contains, for every application that had a new step the day before, the
+timestamp and the employee of each step known so far.
+
+Why not update all rows: an application that is disbursed, rejected or
+withdrawn is finished and does not change any more. Only open applications
+can change. Therefore the table has a column is_open ('Y' while the
+application is in progress, 'N' when it is finished), and the load touches
+only a small part of the table.
+
+Steps of the load:
+
+1. Load the file into a staging table, one row per application, with the
+   timestamps of all steps reached so far.
+2. Calculate in staging the date keys, the lag columns and the is_open
+   flag, so that the final step only copies values.
+3. Detect the changes. Join staging to the fact table on application_number
+   (a unique index exists on it). Applications not found in the fact table
+   are new and are inserted. Applications found are updated only if at
+   least one value in staging is different from the fact table. If the
+   file is loaded twice, the second run changes nothing, because nothing is
+   different.
+4. Update only the columns that can change: the timestamp, date key and
+   responsible employee of the step that was reached; the status; the
+   approved amount, rate and term (set at the decision); the disbursed
+   amount; the lag columns of the finished steps; is_open.
+   These columns are never updated: application_key, application_number,
+   submitted_date_key, customer_key (the version valid at submission) and
+   branch and product.
+5. Update days_in_current_stage for all open applications, because this
+   number grows every day even if there is no new step. This touches about
+   50,000 rows and not 2 million.
+
+A correction of an old, closed application (for example a wrong date) also
+arrives in the file, so step 3 finds it by application_number and updates
+it. No scan of the closed rows is needed to find it.
