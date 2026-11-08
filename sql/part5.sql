@@ -117,3 +117,54 @@ WHERE window_start >= DATE '2026-11-07'
   AND window_start <  DATE '2026-11-08'
 GROUP BY mcc, EXTRACT(HOUR FROM window_start)
 ORDER BY mcc, hour_of_day;
+
+
+-- 5.3 Data-quality tests (each query returns the violating rows)
+
+-- Test 1: uniqueness of grain
+SELECT transaction_id, account_key, COUNT(*) AS rows_found
+FROM fact_transaction
+GROUP BY transaction_id, account_key
+HAVING COUNT(*) > 1;
+
+-- Test 2: referential integrity to dim_customer
+SELECT f.transaction_id, f.customer_key
+FROM fact_transaction f
+LEFT JOIN dim_customer c ON f.customer_key = c.customer_key
+WHERE c.customer_key IS NULL;
+
+-- Test 3: no overlapping Type 2 rows in dim_customer
+SELECT a.client_no, a.customer_key AS key_a, b.customer_key AS key_b
+FROM dim_customer a
+JOIN dim_customer b
+  ON a.client_no = b.client_no
+ AND a.customer_key < b.customer_key
+ AND a.valid_from <= b.valid_to
+ AND b.valid_from <= a.valid_to;
+
+-- Test 4: reconciliation of yesterday against the core banking control record
+SELECT d.full_date,
+       c.row_count      AS source_rows,
+       COUNT(*)         AS warehouse_rows,
+       c.total_abs_uzs  AS source_total,
+       SUM(ABS(f.amount_signed_uzs)) AS warehouse_total
+FROM fact_transaction f
+JOIN dim_date d ON f.date_key = d.date_key
+JOIN abs_control_total c ON c.posting_date = d.full_date
+WHERE d.full_date = CURRENT_DATE - 1
+GROUP BY d.full_date, c.row_count, c.total_abs_uzs
+HAVING COUNT(*) <> c.row_count
+    OR SUM(ABS(f.amount_signed_uzs)) <> c.total_abs_uzs;
+
+-- Test 5: freshness, returns a row if there is no good load since 01:00 today
+SELECT MAX(loaded_at) AS last_successful_load
+FROM load_batch
+WHERE status = 'done'
+HAVING MAX(loaded_at) < CURRENT_DATE + INTERVAL '1 hour';
+
+-- Helper table for control totals sent with the core banking file
+CREATE TABLE abs_control_total (
+    posting_date   DATE PRIMARY KEY,
+    row_count      BIGINT NOT NULL,
+    total_abs_uzs  NUMERIC(20,2) NOT NULL
+);
