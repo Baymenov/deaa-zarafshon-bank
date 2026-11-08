@@ -181,3 +181,16 @@ WHERE h.source_system      = 'CRM'
   AND s.load_date < TIMESTAMP '2026-02-11 00:00:00'
 ORDER BY s.load_date DESC
 LIMIT 1;
+
+
+-- 4.5 New source: only one new satellite is needed
+CREATE TABLE sat_ins_customer (
+    source_customer_hk   CHAR(32) NOT NULL REFERENCES hub_source_customer (source_customer_hk),
+    load_date            TIMESTAMP NOT NULL,
+    record_source        VARCHAR(30) NOT NULL,
+    hash_diff            CHAR(32) NOT NULL,
+    full_name            VARCHAR(200),
+    phone                VARCHAR(20),
+    policy_status        VARCHAR(20),
+    PRIMARY KEY (source_customer_hk, load_date)
+);
