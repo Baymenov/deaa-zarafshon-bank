@@ -935,3 +935,55 @@ Alternative considered: query by PINFL through lnk_customer_source and
 hub_customer. This is needed when the auditor names the customer by PINFL
 and not by crm_id; it adds two joins and gives the same result, because
 the link leads to the same CRM hash key.
+
+
+4.5 New source: insurance partner
+
+Assumptions: the insurer sends customer records with its own customer ID
+and some descriptive attributes (full name, phone, policy status). KYC (or
+the insurer) provides the PINFL for the mapping, as for the other four
+sources. Insurance policies and payments are out of scope here; they would
+need their own hub and fact table in both designs.
+
+(a) Data vault
+
+New tables: 1
+- sat_ins_customer (source_customer_hk, load_date, record_source,
+  hash_diff, full_name, phone, policy_status), attached to
+  hub_source_customer.
+
+Changed tables: 0
+- hub_source_customer gets new rows with source_system = 'INS'. The table
+  already has the columns source_system and source_customer_id, so no
+  column is added.
+- lnk_customer_source gets new rows that connect the insurer ID to the
+  PINFL. No column is added.
+- hub_customer and the four existing satellites are not touched.
+
+New load job: one job for sat_ins_customer, built from the same pattern as
+the other satellites (compare hash_diff, insert if changed).
+
+(b) Star-only design (no vault, sources load straight into dim_customer)
+
+Changed tables:
+- dim_customer: new columns for the insurer ID and the insurer attributes.
+  Every Type 2 row of every customer is affected, and old rows get NULL.
+- The ETL of dim_customer: the matching logic must now join five sources
+  instead of four, and the rules for conflicting values (such as the
+  address rule in 4.3) must be rewritten and retested.
+- The cross-reference table between source IDs and the customer surrogate
+  key (if it exists) gets a new column.
+- Existing reports and views that select from dim_customer must be checked,
+  because the table they read has changed.
+New tables: at least one staging table for the insurer file.
+
+If an insurer attribute is Type 2, a change in it creates a new version of
+the customer, so the dimension grows, and fact rows may have to be re-keyed
+as in 2.4.
+
+Conclusion: in the vault, a new source is an addition. One new satellite
+and new rows in existing tables, with no change to anything that already
+works, so the existing loads and reports need no retest. In a star-only
+design, a new source is a change of the central dimension that every report
+uses, and the work and the risk grow with every source added. The vault
+costs more tables at the start, but its cost per new source stays low.
