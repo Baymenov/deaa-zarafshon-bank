@@ -805,3 +805,53 @@ Alternatives considered:
 Note: the PINFL is personal data, so hub_customer and all satellites are
 stored in the restricted zone described in 5.4. Analysts work with
 customer_hk, not with the PINFL.
+
+
+4.2 New address from the card system
+
+Customer: client_no 88213 in core banking, card_holder_id 5519 in the card
+system, crm_id C-2290 in the CRM (from the case).
+
+Assumptions: the card events carry the address of the customer, and the
+card satellite is loaded once a day, so the new address of 2026-05-03 is
+loaded with load_date 2026-05-03. The CRM export has the same address as
+before. Hash keys and hash_diff values are shortened here for readability;
+in the real tables they are 32-character MD5 values.
+
+sat_card_customer (source_customer_hk = hk_card_5519):
+
+| load_date  | record_source | hash_diff | address                                 |
+| 2026-01-15 | CARD          | 9c41...   | Chilonzor district, Bunyodkor str. 12   |
+| 2026-05-03 | CARD          | e07a...   | Yunusobod district, Amir Temur str. 45  |
+
+sat_crm_customer (source_customer_hk = hk_crm_C2290):
+
+| load_date  | record_source | hash_diff | address                                 |
+| 2026-01-16 | CRM           | 5b2d...   | Chilonzor district, Bunyodkor str. 12   |
+
+After the load the card satellite has two rows and the CRM satellite still
+has one row. The CRM satellite has no new row because the CRM export of
+2026-05-03 and of the following days gives the same hash_diff as the
+latest row, so nothing is inserted.
+
+Why nothing was overwritten:
+1. Satellites are insert-only. The load never runs UPDATE or DELETE on
+   them. A change is a new row with a new load_date, so the old address of
+   the card system (row of 2026-01-15) is still there.
+2. Each source has its own satellite. The card address is written only to
+   sat_card_customer and cannot touch the CRM row. The two sources
+   disagree now, and the raw vault keeps both statements as they were
+   received.
+3. The vault does not decide which address is true. This decision is made
+   in the business layer (see 4.3), so the rule can change later without
+   reloading or repairing any history.
+
+Load rule for a satellite: compute hash_diff of the descriptive columns of
+the incoming record, compare it with the hash_diff of the latest row of the
+same hash key, and insert a row only if they differ.
+
+Alternative considered: update the address in a single customer table and
+keep the old value in a history table. Rejected: this is Type 1 with a
+side table, and it would lose the answer to "what did the CRM say on this
+date", which Question 4.4 asks. It would also mix the values of two
+sources in one column.
