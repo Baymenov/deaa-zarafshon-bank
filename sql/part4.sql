@@ -165,3 +165,19 @@ SELECT customer_hk,
        load_date   AS address_loaded_at
 FROM ranked
 WHERE rn = 1;
+
+
+-- 4.4 CRM segment of customer C-2290 as loaded by 2026-02-10
+SELECT h.source_customer_id AS crm_id,
+       s.segment,
+       s.load_date,
+       s.record_source,
+       s.hash_diff
+FROM hub_source_customer h
+JOIN sat_crm_customer s
+  ON s.source_customer_hk = h.source_customer_hk
+WHERE h.source_system      = 'CRM'
+  AND h.source_customer_id = 'C-2290'
+  AND s.load_date < TIMESTAMP '2026-02-11 00:00:00'
+ORDER BY s.load_date DESC
+LIMIT 1;
