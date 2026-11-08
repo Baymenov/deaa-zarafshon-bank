@@ -124,3 +124,55 @@ JOIN dim_branch b ON f.branch_key = b.branch_key
 JOIN dim_date d ON f.date_key = d.date_key
 WHERE d.full_date = DATE '2026-03-12'
 GROUP BY b.region;
+
+
+1.4 Average monthly balance per customer
+
+Query (last 24 full months, per customer and month):
+
+WITH daily_customer AS (
+    SELECT c.client_no,
+           d.year_month,
+           d.full_date,
+           SUM(f.closing_balance_uzs) AS customer_balance
+    FROM fact_daily_balance f
+    JOIN dim_date d ON f.date_key = d.date_key
+    JOIN dim_customer c ON f.customer_key = c.customer_key
+    WHERE d.full_date >= DATE '2024-11-01'
+      AND d.full_date <  DATE '2026-11-01'
+    GROUP BY c.client_no, d.year_month, d.full_date
+)
+SELECT client_no,
+       year_month,
+       AVG(customer_balance) AS avg_monthly_balance_uzs
+FROM daily_customer
+GROUP BY client_no, year_month
+ORDER BY client_no, year_month;
+
+The query works in two steps. The inner query adds up all accounts of the
+customer for each day (SUM across accounts). The outer query averages these
+daily totals over the days of the month (AVG across time). The result for
+branches is built the same way: join dim_branch instead of dim_customer and
+group by branch.
+
+Why AVG is right and SUM is wrong:
+closing_balance_uzs is a semi-additive fact (see 1.2). It can be added
+across accounts on one day, but not across days. A balance is the amount of
+money on one date, so adding the balances of 30 days counts the same money
+30 times. Example: an account holds 1,000,000 UZS for all 30 days of
+April. SUM over days gives 30,000,000, which is not a balance and would
+change with the number of days in the month (31 days would give 31,000,000
+for the same account). AVG gives 1,000,000, which is the correct average
+balance.
+
+A common mistake is to write AVG(closing_balance_uzs) directly with
+GROUP BY customer. This averages account-days and not customer-days. A
+customer with two accounts of 1,000,000 and 3,000,000 would get 2,000,000
+instead of the correct 4,000,000. This is why the daily SUM across accounts
+comes first.
+
+Assumptions: fact_daily_balance has a row for every open account on every
+day, so days without transactions are included; the date dimension has a
+year_month column; the customer is identified by client_no, because a
+Type 2 customer has several surrogate keys over time; for an account opened
+during the month, the average is taken over the days it existed.
