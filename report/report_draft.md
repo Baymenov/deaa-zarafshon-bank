@@ -1258,3 +1258,105 @@ Alternatives considered:
 - Run the tests only on the final tables. Rejected: staging is checked
   first (duplicates, missing keys), because repairing data before it enters
   the fact table is cheaper than after.
+
+
+5.4 Personal data and localisation
+
+Legal check. Text of Law No. ZRU-547 "On Personal Data" on lex.uz,
+checked on 9 November 2026. Article 27-1 was rewritten by Law No.
+ZRU-1125 of 26 March 2026 (in force from 27 March 2026). Only three
+categories must now be stored in Uzbekistan: biometric data, genetic data
+and data of users of telecom operators working in Uzbekistan. Other
+personal data may be stored and processed abroad if one of three
+conditions holds: the country is recognised as adequate (list set by the
+Cabinet of Ministers), the operator applies approved standard contractual
+clauses or binding corporate rules, or the operator follows approved
+international standards. Under Article 20, only databases subject to
+mandatory localisation must be entered in the State Register of personal
+data databases. Article 16 requires depersonalisation when data are used
+for statistical or research purposes. Article 25 (special categories) was
+amended again by Law No. ZRU-1174 of 11 September 2026; the amended text
+was not yet translated at the time of checking and the Uzbek original
+should be read.
+
+Consequence: the wording of Question 6 matches the old 2021 rule, which
+covered all personal data of Uzbek citizens. PINFL, passport number, full
+name and phone are not in the three mandatory categories (the bank is not
+a telecom operator), so the law no longer forces them to stay in the
+country. The design below keeps the whole platform in Uzbekistan anyway.
+
+Assumptions:
+- The platform holds no biometric or genetic data. Face images and
+  templates from KYC stay in a separate document system outside the
+  platform. If they were loaded, they would have to stay in Uzbekistan and
+  the database would have to be registered.
+- The Central Bank may have its own rules for bank data. They were not
+  checked here and must be confirmed with the compliance team.
+- The address is personal data as well (see 4.3) and is treated like the
+  four fields in the task.
+
+Zones (all in a data centre in Tashkent, with the backup site in another
+Uzbek city and no replication abroad):
+1. Restricted zone (schema pii): the only place with direct identifiers.
+2. Core zone: data vault and star schema, no direct identifiers.
+3. Analytics zone: dim_customer, facts and aggregates for analysts.
+
+| Data | Where stored | Who can query | How analysts still join customers |
+| PINFL | pii.customer_identity, restricted zone. In the vault (4.1), hub_customer keeps no PINFL outside this zone | Compliance officers; the pipeline service account (write only) | Through customer_hk, a keyed hash of the PINFL |
+| Passport number | pii.customer_identity (moved out of sat_kyc_customer) | Compliance officers | Not needed for joins, never leaves the restricted zone |
+| Full name | pii.customer_identity (moved out of the CRM, ABS and KYC satellites) | Compliance officers; relationship managers through the CRM application | Not in the analytics zone; reports use customer_hk and segment |
+| Phone | pii.customer_identity (moved out of the card and app satellites) | Compliance officers; operations staff through the applications | Not in the analytics zone |
+
+Pseudonym: customer_hk is the first 32 hex characters of
+HMAC-SHA-256(pinfl, secret key). The key is kept in an HSM or key
+management service inside Uzbekistan and is never visible to analysts. The
+same PINFL always gives the same customer_hk, so all tables join on it
+without anyone seeing the PINFL. A plain MD5 or SHA hash of a PINFL would
+be unsafe, because a PINFL has only 14 digits and all values can be tried
+until the hash matches. (Consequence for 4.1: hash keys of hub_customer
+use this keyed hash instead of plain MD5.)
+
+Analyst access: the analyst role has SELECT only on the analytics schema
+and no privilege on schema pii. dim_customer holds customer_hk, branch,
+region, segment and risk rating, but no name, phone, PINFL or passport
+number. The address is reduced to region and district there, and the full
+address stays in the restricted zone. This also follows Article 16:
+statistical analysis works on depersonalised data.
+
+Re-identification (for example an audit request) is possible only for
+compliance officers, on an approved request, with a time limit, and every
+query on schema pii is logged.
+
+Evidence for the Central Bank (Question 6):
+1. Data inventory: a register of every system and table that holds
+   personal data, with its location.
+2. Infrastructure proof: the contract and the address of the data centre,
+   the asset list of servers and storage (serial numbers, rack), and
+   the same for the backup site.
+3. Architecture and data-flow diagram showing all three zones inside
+   Uzbekistan and no external target for personal data.
+4. Network evidence: the IP ranges of the servers, firewall rules that block
+   outbound traffic with personal data to foreign addresses, and the
+   outbound connection logs for the last 12 months.
+5. Access evidence: access logs for schema pii (who, when, from which
+   network), the list of roles and the quarterly access review.
+6. Key evidence: the HSM or key service is physically in Uzbekistan.
+7. Third parties: the list of processors with contract clauses that require
+   processing in Uzbekistan, and a confirmation that BI tools used by
+   analysts hold no direct identifiers.
+8. An independent audit or penetration test report and the name of the
+   unit responsible for personal data (Article 31).
+9. If the platform ever holds biometric or genetic data: the registration
+   certificate of that database in the State Register (Article 20).
+
+Alternatives considered:
+- Hybrid: restricted zone in Uzbekistan and analytics zone in a foreign
+  cloud on pseudonymised data. Rejected: pseudonymised data are still
+  personal data, because the bank can re-identify them with the key; a
+  transfer would need an adequacy decision, approved clauses or approved
+  standards that the bank would have to maintain and prove; and the 9 million
+  rows a day do not need foreign capacity.
+- One zone with column masking only. Rejected: one mistake in a view
+  exposes the identifiers, while a separate schema with separate privileges
+  limits the damage.
+- Plain hash of the PINFL as the join key. Rejected, see above.
