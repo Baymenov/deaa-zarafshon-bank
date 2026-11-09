@@ -1360,3 +1360,78 @@ Alternatives considered:
   exposes the identifiers, while a separate schema with separate privileges
   limits the damage.
 - Plain hash of the PINFL as the join key. Rejected, see above.
+
+
+5.5 Cost and operations
+
+Volume (assumption from the task: 9 million rows a day, 200 bytes per row
+before compression; each row is one posting, as in 1.3):
+
+Per day:   9,000,000 rows x 200 bytes = 1.8 GB before compression
+Per year:  1.8 GB x 365 = 657 GB before compression (about 3.3 billion rows)
+In Parquet at 5x compression: 657 GB / 5 = about 131 GB a year
+(about 0.36 GB a day).
+
+Storage is small. Even five years of transactions take about 0.66 TB in
+Parquet, so the real cost of the platform is the compute of the nightly
+load and the queries, not the disk.
+
+Partitioning: by posting date, one partition per day, grouped in
+year/month/day folders. Inside each day the rows are sorted by branch_key,
+so that queries by region read fewer blocks. One day is about 0.36 GB in
+Parquet, which is a good file size (large enough to avoid the small-files
+problem, small enough to rewrite quickly).
+
+Why by day: the main queries (Question 1) and the nightly load work with
+one day, and a correction of an old transaction (see 5.1) rewrites only
+that one day's partition, about 0.36 GB.
+
+Retention (assumption: the real periods must be confirmed with compliance):
+| Layer | Period | Storage |
+| Raw core-banking files and Kafka events in the lake | 90 days | Standard storage, needed for re-runs and reconciliation |
+| fact_transaction, last 24 months | online | Fast storage, serves the dashboards and Question 1 |
+| fact_transaction, 2 to 5 years old | online, partitions not touched | Cheaper storage tier |
+| fact_transaction, older than 5 years | archive, then deletion at the end of the legal period | Archive tier |
+| fact_daily_balance | last 90 days (see 1.5) | Fast storage; older months live in fact_monthly_balance |
+Personal data in the restricted zone is kept no longer than the purpose
+requires (Article 10 of the personal data law).
+
+Alert: daily volume deviation.
+After the load step the pipeline compares the number of rows loaded for
+yesterday's posting date with the average of the same weekday over the last
+4 weeks. If the difference is more than 20% (for 9 million rows, below 7.2
+or above 10.8 million), the alert goes to the on-call data engineer and
+the pipeline continues but marks the day as "under review" on the
+dashboard.
+
+SELECT y.full_date, y.rows_loaded, b.avg_rows
+FROM (SELECT d.full_date, COUNT(*) AS rows_loaded
+      FROM fact_transaction f
+      JOIN dim_date d ON f.date_key = d.date_key
+      WHERE d.full_date BETWEEN CURRENT_DATE - 29 AND CURRENT_DATE - 1
+      GROUP BY d.full_date) y
+CROSS JOIN (SELECT AVG(rows_loaded) AS avg_rows
+            FROM (SELECT d.full_date, COUNT(*) AS rows_loaded
+                  FROM fact_transaction f
+                  JOIN dim_date d ON f.date_key = d.date_key
+                  WHERE d.full_date BETWEEN CURRENT_DATE - 29 AND CURRENT_DATE - 2
+                  GROUP BY d.full_date) h
+            WHERE EXTRACT(DOW FROM h.full_date) = EXTRACT(DOW FROM CURRENT_DATE - 1)) b
+WHERE y.full_date = CURRENT_DATE - 1
+  AND ABS(y.rows_loaded - b.avg_rows) > 0.2 * b.avg_rows;
+
+Why this alert: the reconciliation test of 5.3 compares the warehouse with
+the control totals of the source file, so it catches rows lost on the way.
+It cannot catch a file that is already wrong at the source (a half-empty
+extract with matching control totals, or a day with almost no rows). The
+volume alert catches this case. Public holidays can trigger it, so the
+on-call engineer checks the calendar before acting.
+
+Alternatives considered:
+- Partition by month. Rejected: one correction rewrites about 11 GB
+  (a month of data) instead of 0.36 GB.
+- Partition by date and region. Rejected: Tashkent is much larger than the
+  other regions, so partitions are unequal, and many small files slow the
+  queries down.
+- Alert on pipeline duration. Not chosen as the single alert, because the
+  freshness test in 5.3 already shows when the load is late.
