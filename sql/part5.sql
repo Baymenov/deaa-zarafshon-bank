@@ -168,3 +168,51 @@ CREATE TABLE abs_control_total (
     row_count      BIGINT NOT NULL,
     total_abs_uzs  NUMERIC(20,2) NOT NULL
 );
+
+
+-- 5.4 Restricted zone for direct identifiers
+-- (assumes the star schema tables are in schema dwh)
+CREATE SCHEMA pii;
+
+CREATE TABLE pii.customer_identity (
+    customer_hk      CHAR(32) PRIMARY KEY,
+    pinfl            CHAR(14) NOT NULL UNIQUE,
+    passport_number  VARCHAR(20),
+    full_name        VARCHAR(200),
+    phone            VARCHAR(20),
+    full_address     VARCHAR(300),
+    load_date        TIMESTAMP NOT NULL,
+    record_source    VARCHAR(30) NOT NULL
+);
+
+-- dim_customer gets the pseudonym and a coarse address (no identifiers)
+ALTER TABLE dwh.dim_customer ADD COLUMN customer_hk CHAR(32);
+ALTER TABLE dwh.dim_customer ADD COLUMN address_district VARCHAR(100);
+
+-- customer_hk = first 32 hex characters of HMAC-SHA-256(pinfl, secret key).
+-- The key comes from the in-country key service and is not stored in a table.
+-- Example with the pgcrypto extension (the key is a session setting):
+SELECT SUBSTRING(
+           ENCODE(HMAC(pinfl, CURRENT_SETTING('app.pii_key'), 'sha256'), 'hex')
+           FROM 1 FOR 32) AS customer_hk
+FROM stg_kyc_customer;
+
+-- Roles and privileges
+CREATE ROLE analyst;
+CREATE ROLE compliance_officer;
+CREATE ROLE pipeline_service;
+
+REVOKE ALL ON SCHEMA pii FROM PUBLIC;
+GRANT USAGE ON SCHEMA pii TO compliance_officer, pipeline_service;
+GRANT SELECT ON pii.customer_identity TO compliance_officer;
+GRANT INSERT, UPDATE ON pii.customer_identity TO pipeline_service;
+
+GRANT USAGE ON SCHEMA dwh TO analyst;
+GRANT SELECT ON dwh.dim_customer, dwh.fact_transaction,
+                dwh.fact_daily_balance TO analyst;
+
+-- Re-identification, only for compliance officers (every query is logged)
+SELECT i.pinfl, i.full_name
+FROM pii.customer_identity i
+JOIN dwh.dim_customer c ON c.customer_hk = i.customer_hk
+WHERE c.client_no = 4471;
