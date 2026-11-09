@@ -216,3 +216,21 @@ SELECT i.pinfl, i.full_name
 FROM pii.customer_identity i
 JOIN dwh.dim_customer c ON c.customer_hk = i.customer_hk
 WHERE c.client_no = 4471;
+
+
+-- 5.5 Alert: volume of yesterday compared with the same weekday of the last 4 weeks
+SELECT y.full_date, y.rows_loaded, b.avg_rows
+FROM (SELECT d.full_date, COUNT(*) AS rows_loaded
+      FROM fact_transaction f
+      JOIN dim_date d ON f.date_key = d.date_key
+      WHERE d.full_date BETWEEN CURRENT_DATE - 29 AND CURRENT_DATE - 1
+      GROUP BY d.full_date) y
+CROSS JOIN (SELECT AVG(rows_loaded) AS avg_rows
+            FROM (SELECT d.full_date, COUNT(*) AS rows_loaded
+                  FROM fact_transaction f
+                  JOIN dim_date d ON f.date_key = d.date_key
+                  WHERE d.full_date BETWEEN CURRENT_DATE - 29 AND CURRENT_DATE - 2
+                  GROUP BY d.full_date) h
+            WHERE EXTRACT(DOW FROM h.full_date) = EXTRACT(DOW FROM CURRENT_DATE - 1)) b
+WHERE y.full_date = CURRENT_DATE - 1
+  AND ABS(y.rows_loaded - b.avg_rows) > 0.2 * b.avg_rows;
